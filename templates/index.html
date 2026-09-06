@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>美股助手</title>
+<style>
+:root{
+  --bg:#F5F5F7; --card:#FFF; --text:#1D1D1F; --text-sec:#86868B;
+  --blue:#007AFF; --green:#34C759; --red:#FF3B30; --purple:#5856D6;
+  --sep:rgba(60,60,67,0.12); --fill:rgba(120,120,128,0.12);
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Helvetica Neue",sans-serif;
+  background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;letter-spacing:-0.01em;}
+
+.nav{position:sticky;top:0;z-index:100;backdrop-filter:saturate(180%) blur(20px);
+  -webkit-backdrop-filter:saturate(180%) blur(20px);background:rgba(255,255,255,0.72);
+  border-bottom:0.5px solid var(--sep);padding:14px 20px 10px;text-align:center;}
+.nav h1{font-size:17px;font-weight:600;}
+
+.hero{padding:30px 22px 18px;}
+.hero-title{font-size:36px;font-weight:700;line-height:1.1;letter-spacing:-0.02em;}
+.hero-sub{font-size:16px;color:var(--text-sec);margin-top:6px;}
+
+.seg-wrap{padding:0 22px 16px;}
+.segmented{position:relative;display:flex;background:var(--fill);border-radius:9px;padding:2px;}
+.seg-thumb{position:absolute;top:2px;bottom:2px;left:2px;width:calc((100% - 4px)/3);
+  background:#fff;border-radius:7px;box-shadow:0 3px 8px rgba(0,0,0,0.12);
+  transition:transform .32s cubic-bezier(.4,0,.2,1);}
+.seg-btn{position:relative;z-index:1;flex:1;padding:8px 4px;text-align:center;font-size:14px;
+  font-weight:500;border:none;background:none;cursor:pointer;font-family:inherit;color:var(--text);}
+.seg-btn.active{font-weight:600;}
+
+.content{padding:0 22px 60px;}
+.panel{display:none;animation:fadeUp .4s cubic-bezier(.4,0,.2,1);}
+.panel.active{display:block;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:none;}}
+
+.card{background:var(--card);border-radius:18px;padding:18px;margin-bottom:14px;
+  box-shadow:0 1px 3px rgba(0,0,0,.04),0 6px 20px rgba(0,0,0,.05);}
+.card h3{font-size:12px;font-weight:600;color:var(--text-sec);text-transform:uppercase;
+  letter-spacing:.06em;margin-bottom:14px;}
+
+.field{width:100%;padding:14px 16px;border:1px solid var(--sep);border-radius:12px;
+  font-size:16px;background:#fff;color:var(--text);margin-bottom:12px;outline:none;
+  font-family:inherit;transition:border-color .25s,box-shadow .25s;}
+.field:focus{border-color:var(--blue);box-shadow:0 0 0 4px rgba(0,122,255,.12);}
+
+.btn{width:100%;padding:15px;border:none;border-radius:12px;font-size:16px;font-weight:600;
+  font-family:inherit;cursor:pointer;background:var(--blue);color:#fff;transition:transform .15s;}
+.btn:active{transform:scale(.97);opacity:.85;}
+.btn-green{background:var(--green);}
+.btn-red{background:var(--red);padding:9px;font-size:13px;border-radius:10px;}
+
+.stock-row{display:flex;justify-content:space-between;align-items:center;
+  padding:14px 0;border-bottom:.5px solid var(--sep);}
+.stock-row:last-of-type{border-bottom:none;}
+.sym{font-size:19px;font-weight:600;}
+.meta{font-size:13px;color:var(--text-sec);margin-top:3px;}
+.price-lg{font-size:21px;font-weight:600;font-variant-numeric:tabular-nums;}
+.pill{display:inline-block;padding:3px 9px;border-radius:20px;font-size:13px;font-weight:600;
+  margin-top:5px;font-variant-numeric:tabular-nums;}
+.pill-up{background:rgba(52,199,89,.14);color:var(--green);}
+.pill-down{background:rgba(255,59,48,.12);color:var(--red);}
+
+.row{display:flex;justify-content:space-between;align-items:baseline;padding:11px 0;
+  border-bottom:.5px solid var(--sep);}
+.row:last-child{border-bottom:none;}
+.row .k{font-size:15px;color:var(--text-sec);}
+.row .v{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums;}
+
+.model-row{display:flex;justify-content:space-between;align-items:baseline;padding:10px 0;
+  border-bottom:.5px solid var(--sep);font-size:15px;}
+.model-row:last-child{border-bottom:none;}
+.model-row .mk{color:var(--text);}
+.model-row .mv{font-weight:600;font-variant-numeric:tabular-nums;}
+.model-row.best{background:rgba(88,86,214,.08);font-weight:700;border-radius:8px;padding-left:8px;padding-right:8px;}
+
+.fair-hero{background:linear-gradient(135deg,#5856D6 0%,#AF52DE 100%);border-radius:16px;
+  padding:20px;margin:4px 0 16px;color:#fff;}
+.fair-hero .fl{font-size:13px;opacity:.9;font-weight:500;}
+.fair-hero .fv{font-size:38px;font-weight:700;margin:6px 0 4px;font-variant-numeric:tabular-nums;}
+.fair-hero .fd{font-size:14px;opacity:.95;font-weight:500;}
+
+.tagline{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}
+.tag{background:var(--fill);border-radius:20px;padding:5px 12px;font-size:13px;font-weight:500;}
+
+.bar-wrap{margin-top:14px;}
+.bar-label{font-size:13px;color:var(--text-sec);margin-bottom:7px;display:flex;justify-content:space-between;}
+.bar{height:8px;background:var(--fill);border-radius:99px;overflow:hidden;}
+.bar-fill{height:100%;border-radius:99px;transition:width .6s cubic-bezier(.4,0,.2,1);}
+.b-low{background:linear-gradient(90deg,#FF3B30,#FF453A);}
+.b-mid{background:linear-gradient(90deg,#FF9500,#FF9F0A);}
+.b-high{background:linear-gradient(90deg,#34C759,#30D158);}
+
+.fin-block{padding:12px 0;border-bottom:.5px solid var(--sep);}
+.fin-block:last-child{border-bottom:none;}
+.fin-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;}
+
+.pos-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
+.pos-sym{font-size:20px;font-weight:700;}
+.delta{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;}
+.delta-lbl{font-size:12px;color:var(--text-sec);text-align:right;}
+.d-buy{color:var(--green);} .d-sell{color:var(--red);} .d-hold{color:var(--text-sec);}
+
+.hold-grid{display:flex;gap:10px;margin-top:12px;}
+.hold-grid .field{margin-bottom:0;flex:1;}
+
+select.field{appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath fill='%2386868B' d='M1 1l5 5 5-5'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 16px center;padding-right:40px;}
+
+.empty{text-align:center;padding:40px 20px;color:var(--text-sec);font-size:15px;}
+.note{font-size:12px;color:var(--text-sec);margin-top:10px;line-height:1.5;}
+</style>
+</head>
+<body>
+
+<div class="nav"><h1>美股助手</h1></div>
+
+<div class="hero">
+  <div class="hero-title">估值与仓位</div>
+  <div class="hero-sub">行业 × 景气阶段 · 精选估值模型</div>
+</div>
+
+<div class="seg-wrap">
+  <div class="segmented">
+    <div class="seg-thumb" id="segThumb"></div>
+    <button class="seg-btn active" onclick="switchTab(0)">行情</button>
+    <button class="seg-btn" onclick="switchTab(1)">分析</button>
+    <button class="seg-btn" onclick="switchTab(2)">仓位</button>
+  </div>
+</div>
+
+<div class="content">
+
+<!-- ========== 行情 ========== -->
+<div class="panel active" id="p0">
+  <div class="card">
+    <h3>添加股票</h3>
+    <input class="field" type="text" id="newSymbol" placeholder="输入代码，如 GOOGL" maxlength="10" autocomplete="off">
+    <button class="btn" id="addBtn" onclick="addStock()">添加</button>
+  </div>
+  <div class="card" id="stockList"><div class="empty">加载中…</div></div>
+</div>
+
+<!-- ========== 分析 ========== -->
+<div class="panel" id="p1">
+  <div class="card">
+    <h3>选择股票</h3>
+    <select class="field" id="analysisSym"></select>
+    <button class="btn" onclick="runAnalysis()">开始分析</button>
+  </div>
+  <div id="analysisResult"></div>
+</div>
+
+<!-- ========== 仓位 ========== -->
+<div class="panel" id="p2">
+  <div class="card">
+    <h3>可用资金 (USD)</h3>
+    <input class="field" type="number" id="capital" placeholder="例如 10000" min="0" inputmode="decimal">
+    <button class="btn btn-green" onclick="calcPosition()">计算仓位</button>
+    <div class="note">已持仓的股票，可在下方卡片填写「成本价」与「持股数」，再次点击计算即可得到具体买卖股数建议。</div>
+  </div>
+  <div id="positionResult"></div>
+</div>
+
+</div>
+
+<script>
+let currentSymbols = [];
+let holdingsState = {};
+
+const MODEL_NAMES = {
+  'analyst_target':'分析师目标价',
+  'pe_valuation':'P/E 估值 (EPS×22)',
+  'pb_valuation':'P/B 估值 (净资产×3)',
+  'ps_valuation':'P/S 估值 (每股营收×5)',
+  'ev_ebitda':'EV/EBITDA 估值 (×12)',
+  'ddm':'股息折现 DDM',
+  'mean_reversion':'历史均值回归 (250日)'
+};
+
+/* ---------- Tab ---------- */
+function switchTab(idx){
+  document.querySelectorAll('.seg-btn').forEach((b,i)=>b.classList.toggle('active',i===idx));
+  document.getElementById('segThumb').style.transform='translateX('+(idx*100)+'%)';
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.getElementById('p'+idx).classList.add('active');
+  if(idx===0) loadStocks();
+  if(idx===1) loadAnalysisSelect();
+}
+
+/* ---------- 本地列表 ---------- */
+function getSymbols(){
+  let s = localStorage.getItem('mySymbols');
+  return s ? JSON.parse(s) : ["NVDA","TSLA","AAPL","MSFT","AMD"];
+}
+function saveSymbols(arr){ localStorage.setItem('mySymbols', JSON.stringify(arr)); }
+
+/* ---------- 行情 ---------- */
+function loadStocks(){
+  const symbols = getSymbols();
+  fetch('/api/stocks',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({symbols:symbols})})
+  .then(r=>r.json()).then(data=>{
+    currentSymbols = data.filter(d=>!d.error).map(d=>d.symbol);
+    let html='';
+    if(!data.length) html='<div class="empty">暂无股票，请在上方添加</div>';
+    data.forEach(d=>{
+      if(d.error){
+        html+=`<div class="stock-row"><div><div class="sym">${d.symbol}</div>
+          <div class="meta">数据暂不可用</div></div></div>`;
+      }else{
+        const up=d.change>=0, pill=up?'pill-up':'pill-down', sign=up?'+':'';
+        html+=`<div class="stock-row">
+          <div><div class="sym">${d.symbol}</div>
+          <div class="meta">营收 ${d.revenue?'$'+d.revenue+'B':'—'} · EPS惊喜 ${d.epsSurprise!=null?d.epsSurprise+'%':'—'}</div></div>
+          <div style="text-align:right;"><div class="price-lg">$${d.price}</div>
+          <span class="pill ${pill}">${sign}${d.change}%</span></div></div>
+          <button class="btn btn-red" onclick="removeStock('${d.symbol}')">移除 ${d.symbol}</button>`;
+      }
+    });
+    document.getElementById('stockList').innerHTML=html;
+  }).catch(()=>{document.getElementById('stockList').innerHTML='<div class="empty">加载失败</div>';});
+}
+
+async function addStock(){
+  const el=document.getElementById('newSymbol');
+  const sym=el.value.trim().toUpperCase();
+  if(!sym) return;
+  const btn=document.getElementById('addBtn');
+  const orig=btn.textContent;
+  btn.textContent='验证中…'; btn.disabled=true;
+  try{
+    const res=await fetch('/api/validate/'+sym);
+    const d=await res.json();
+    if(!d.valid){ alert('❌ 股票代码 '+sym+' 无效或无法获取数据，请检查后重试！'); return; }
+    const arr=getSymbols();
+    if(arr.includes(sym)){ alert('⚠️ '+sym+' 已在列表中'); return; }
+    arr.push(sym); saveSymbols(arr); el.value=''; loadStocks();
+  }catch(e){ alert('⚠️ 验证失败，请检查网络后重试'); }
+  finally{ btn.textContent=orig; btn.disabled=false; }
+}
+
+function removeStock(sym){
+  let arr=getSymbols().filter(s=>s!==sym);
+  saveSymbols(arr); loadStocks();
+}
+
+/* ---------- 分析 ---------- */
+function loadAnalysisSelect(){
+  const symbols=getSymbols();
+  fetch('/api/stocks',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({symbols:symbols})})
+  .then(r=>r.json()).then(data=>{
+    const valid=data.filter(d=>!d.error);
+    let html='';
+    valid.forEach(d=>{html+=`<option value="${d.symbol}">${d.symbol}</option>`;});
+    document.getElementById('analysisSym').innerHTML=html||'<option>暂无股票</option>';
+  });
+}
+
+function runAnalysis(){
+  const sym=document.getElementById('analysisSym').value;
+  if(!sym) return;
+  document.getElementById('analysisResult').innerHTML='<div class="card"><div class="empty">分析中…</div></div>';
+  fetch('/api/analysis/'+sym).then(r=>r.json()).then(d=>{
+    if(d.error){document.getElementById('analysisResult').innerHTML=`<div class="card"><div class="empty">${d.error}</div></div>`;return;}
+
+    const up=d.discount>0;
+    const dTxt=d.discount!=null?(up?`低于合理价 ${d.discount}%`:`高于合理价 ${Math.abs(d.discount)}%`):'—';
+    const barC=d.positionPct<33?'b-low':(d.positionPct<66?'b-mid':'b-high');
+    const bestKeys=d.bestKeys||[];
+
+    // 模型明细
+    let models='';
+    if(d.models&&Object.keys(d.models).length){
+      models='<div style="margin-top:6px;">';
+      for(const [k,v] of Object.entries(d.models)){
+        const isBest=bestKeys.includes(k);
+        const name=(MODEL_NAMES[k]||k)+(isBest?' ★':'');
+        models+=`<div class="model-row ${isBest?'best':''}"><span class="mk">${name}</span><span class="mv">$${v}</span></div>`;
+      }
+      models+='</div>';
+    }
+
+    // 财报
+    let finHtml='';
+    if(d.financials&&d.financials.length){
+      finHtml='<h3 style="margin-top:20px;">财报（近1年 · 季度）</h3><div style="margin-top:6px;">';
+      d.financials.forEach(f=>{
+        const yoyTxt=f.yoy!=null?(f.yoy>=0?'+'+f.yoy+'%':f.yoy+'%'):'—';
+        const yoyColor=f.yoy!=null?(f.yoy>=0?'var(--green)':'var(--red)'):'var(--text-sec)';
+        finHtml+=`<div class="fin-block">
+          <div class="fin-head"><span style="font-size:15px;font-weight:600;">${f.date}</span>
+          <span style="font-size:13px;font-weight:600;color:${yoyColor};">营收同比 ${yoyTxt}</span></div>
+          <div class="model-row"><span class="mk">营收</span><span class="mv">${f.revenue!=null?'$'+f.revenue+'B':'—'}</span></div>
+          <div class="model-row"><span class="mk">净利润</span><span class="mv">${f.netIncome!=null?'$'+f.netIncome+'B':'—'}</span></div>
+          <div class="model-row"><span class="mk">每股收益 EPS</span><span class="mv">${f.eps!=null?'$'+f.eps:'—'}</span></div>
+        </div>`;
+      });
+      finHtml+='</div>';
+    }
+
+    const fbNote=d.isFallback?'<div class="note">⚠️ 该行业推荐模型数据不足，已回退使用兜底模型</div>':'';
+
+    document.getElementById('analysisResult').innerHTML=`
+    <div class="card">
+      <h3>${d.symbol} · 合理价位</h3>
+      <div class="tagline">
+        <span class="tag">行业：${d.sector}</span>
+        <span class="tag">景气：${d.phaseLabel}</span>
+      </div>
+      <div class="fair-hero">
+        <div class="fl">最合适模型 · ${d.bestLabel}</div>
+        <div class="fv">$${d.fairValue??'—'}</div>
+        <div class="fd">${dTxt}${d.bestKeys&&d.bestKeys.length>1?' · 多模型等权':''}</div>
+      </div>
+      ${fbNote}
+      <div class="row"><span class="k">当前价格</span><span class="v">$${d.currentPrice}</span></div>
+      <h3 style="margin-top:20px;">各模型估值明细</h3>
+      ${models}
+      ${finHtml}
+      <h3 style="margin-top:20px;">历史百分位</h3>
+      <div class="row"><span class="k">52周区间</span><span class="v">$${d.histMin} – $${d.histMax}</span></div>
+      <div class="bar-wrap">
+        <div class="bar-label"><span>高低价之间位置</span><span>${d.positionPct}%</span></div>
+        <div class="bar"><div class="bar-fill ${barC}" style="width:${d.positionPct}%"></div></div>
+      </div>
+      <div class="bar-wrap">
+        <div class="bar-label"><span>历史价格分布百分位</span><span>${d.percentile}%</span></div>
+        <div class="bar"><div class="bar-fill ${barC}" style="width:${d.percentile}%"></div></div>
+      </div>
+    </div>`;
+  });
+}
+
+/* ---------- 仓位 ---------- */
+function collectHoldings(){
+  const h={};
+  document.querySelectorAll('.holding-input').forEach(inp=>{
+    const sym=inp.dataset.sym, field=inp.dataset.field;
+    h[sym]=h[sym]||{}; h[sym][field]=inp.value;
+  });
+  Object.assign(holdingsState,h);
+  return holdingsState;
+}
+
+function calcPosition(){
+  const cap=parseFloat(document.getElementById('capital').value);
+  if(!cap||cap<=0){alert('请输入有效的资金数额');return;}
+  collectHoldings();
+  document.getElementById('positionResult').innerHTML='<div class="card"><div class="empty">计算中…</div></div>';
+  fetch('/api/position',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({capital:cap,symbols:getSymbols(),holdings:holdingsState})})
+  .then(r=>r.json()).then(data=>{
+    let html=''; let totalBuy=0;
+    data.forEach(d=>{
+      if(d.error) return;
+      const st=holdingsState[d.symbol]||{};
+      const isBuy=d.actionType==='buy', isSell=d.actionType==='sell';
+      const dClass=isBuy?'d-buy':(isSell?'d-sell':'d-hold');
+      const dTxt=isBuy?('+'+d.delta):(isSell?('-'+d.delta):'0');
+      const pill=d.discount>0?'pill-up':'pill-down';
+      if(isBuy) totalBuy+=d.delta*d.price;
+
+      html+=`<div class="pos-card card">
+        <div class="pos-head">
+          <div><div class="pos-sym">${d.symbol}</div>
+          <span class="pill ${pill}">${d.action}</span></div>
+          <div><div class="delta ${dClass}">${dTxt}</div><div class="delta-lbl">股</div></div>
+        </div>
+        <div class="row"><span class="k">现价 / 合理价</span><span class="v">$${d.price} / $${d.fairValue}</span></div>
+        <div class="row"><span class="k">行业 / 景气</span><span class="v">${d.sector} · ${d.phase==='up'?'上升期':(d.phase==='down'?'下降期':'维持期')}</span></div>
+        ${d.holding?`
+          <div class="row"><span class="k">持仓市值</span><span class="v">$${d.marketValue}</span></div>
+          <div class="row"><span class="k">浮动盈亏</span><span class="v" style="color:${d.pnl>=0?'var(--green)':'var(--red)'}">${d.pnl>=0?'+':''}$${d.pnl} (${d.pnlPct}%)</span></div>
+        `:`
+          <div class="row"><span class="k">建议配置 (${d.weight||0}%)</span><span class="v">$${d.allocation||0}</span></div>
+        `}
+        <div class="row"><span class="k">止损价 (-15%)</span><span class="v" style="color:var(--red)">$${d.stopLoss}</span></div>
+        <div class="row"><span class="k">目标价</span><span class="v" style="color:var(--green)">$${d.targetPrice}</span></div>
+        <div class="hold-grid">
+          <input class="field holding-input" data-sym="${d.symbol}" data-field="cost" type="number" inputmode="decimal" placeholder="成本价" value="${st.cost||''}">
+          <input class="field holding-input" data-sym="${d.symbol}" data-field="shares" type="number" inputmode="numeric" placeholder="持股数" value="${st.shares||''}">
+        </div>
+        <div class="note">💡 ${d.detail}</div>
+      </div>`;
+    });
+    if(!html) html='<div class="card"><div class="empty">无有效数据</div></div>';
+    else html+=`<div class="card"><div class="row"><span class="k">计划买入合计</span><span class="v">$${totalBuy.toFixed(0)} / $${cap}</span></div></div>`;
+    document.getElementById('positionResult').innerHTML=html;
+  });
+}
+
+loadStocks();
+</script>
+</body>
+</html>
