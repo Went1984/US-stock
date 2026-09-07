@@ -418,7 +418,197 @@ def analyze(symbol):
 
 
 # ============================================================
-# API: 仓位（支持持仓成本/股数）
+# 板块 ETF 映射（用于板块轮动动量判断）
+# ============================================================
+SECTOR_ETF = {
+    'technology': 'XLK',
+    'financial services': 'XLF',
+    'healthcare': 'XLV',
+    'consumer cyclical': 'XLY',
+    'consumer defensive': 'XLP',
+    'energy': 'XLE',
+    'basic materials': 'XLB',
+    'industrials': 'XLI',
+    'real estate': 'XLRE',
+    'utilities': 'XLU',
+    'communication services': 'XLC',
+}
+
+
+def get_market_context(needed_sectors=None):
+    """获取可量化的宏观代理指标：大盘趋势、VIX、板块动量排名"""
+    ctx = {
+        'sp500_price': None, 'sp500_ma200': None, 'sp500_above_ma200': None,
+        'vix': None, 'sector_rank': {}, 'sector_weak': False,
+    }
+
+    # 1) 标普500 vs 200日均线
+    try:
+        h = yf.download('^GSPC', period='1y', progress=False)
+        s = _pick_close(h)
+        if s is not None and len(s) > 200:
+            price = float(s.iloc[-1])
+            ma200 = float(s.rolling(200).mean().iloc[-1])
+            ctx['sp500_price'] = round(price, 2)
+            ctx['sp500_ma200'] = round(ma200, 2)
+            ctx['sp500_above_ma200'] = price > ma200
+    except Exception:
+        pass
+
+    # 2) 恐慌指数 VIX
+    try:
+        v = yf.download('^VIX', period='1mo', progress=False)
+        sv = _pick_close(v)
+        if sv is not None and len(sv) > 0:
+            ctx['vix'] = round(float(sv.iloc[-1]), 2)
+    except Exception:
+        pass
+
+    # 3) 板块动量（近3个月收益率排名）
+    try:
+        keys = needed_sectors or list(SECTOR_ETF.keys())
+        rets = {}
+        for key in keys:
+            etf = SECTOR_ETF.get(key)
+            if not etf:
+                continue
+            try:
+                hh = yf.Ticker(etf).history(period='6mo')
+                ss = _pick_close(hh)
+                if ss is not None and len(ss) > 63:
+                    r = (float(ss.iloc[-1]) / float(ss.iloc[-63]) - 1) * 100
+                    rets[key] = r
+            except Exception:
+                pass
+        if rets:
+            ordered = sorted(rets.items(), key=lambda x: x[1], reverse=True)
+            total = len(ordered)
+            for i, (k, r) in enumerate(ordered):
+                ctx['sector_rank'][k] = {'rank': i + 1, 'total': total, 'return3m': round(r, 1)}
+    except Exception:
+        pass
+
+    return ctx
+
+
+def calc_cash_ratio(ctx, holding_value, total_capital, override=None):
+    """计算建议现金比例(%)：基准20% + 可量化代理指标调整，限制10%~70%"""
+    if override is not None:
+        try:
+            v = float(override)
+            v = max(0.0, min(v, 100.0))
+            return round(v, 1), [{'item': '手动覆盖', 'delta': None,
+                                  'reason': f'你手动设定现金比例为 {v}%'}]
+        except Exception:
+            pass
+
+    ratio = 20.0
+    reasons = []
+
+    # 大盘趋势
+    above = ctx.get('sp500_above_ma200')
+    sp, ma = ctx.get('sp500_price'), ctx.get('sp500_ma200')
+    if above is False:
+        ratio += 15
+        reasons.append({'item': '大盘趋势', 'delta': 15,
+                        'reason': f'标普500({sp}) 低于200日均线({ma})，熊市信号，增加防守'})
+    elif above is True:
+        reasons.append({'item': '大盘趋势', 'delta': 0,
+                        'reason': f'标普500({sp}) 在200日均线上方，趋势健康'})
+    else:
+        reasons.append({'item': '大盘趋势', 'delta': 0, 'reason': '大盘数据不可用，未调整'})
+
+    # 恐慌指数 VIX
+    vix = ctx.get('vix')
+    if vix is not None:
+        if vix > 30:
+            ratio -= 10
+            reasons.append({'item': '恐慌指数 VIX', 'delta': -10,
+                            'reason': f'VIX={vix}(>30，市场恐慌)，别人恐惧我贪婪，减少现金'})
+        elif vix < 15:
+            ratio += 10
+            reasons.append({'item': '恐慌指数 VIX', 'delta': 10,
+                            'reason': f'VIX={vix}(<15，过度乐观)，风险积聚，增加现金'})
+        else:
+            reasons.append({'item': '恐慌指数 VIX', 'delta': 0,
+                            'reason': f'VIX={vix}(15~30 正常区间)，未调整'})
+    else:
+        reasons.append({'item': '恐慌指数 VIX', 'delta': 0, 'reason': 'VIX 数据不可用，未调整'})
+
+    # 板块轮动（持仓/关注板块动量是否偏弱）
+    if ctx.get('sector_weak'):
+        ratio += 5
+        reasons.append({'item': '板块轮动', 'delta': 5,
+                        'reason': '你所持板块动量排名靠后（后1/3），板块退潮，增加现金'})
+    else:
+        reasons.append({'item': '板块轮动', 'delta': 0, 'reason': '板块动量未处于弱势区间'})
+
+    # 持仓水位
+    if total_capital > 0:
+        pos_ratio = holding_value / total_capital * 100
+        if pos_ratio > 70:
+            ratio += 10
+            reasons.append({'item': '持仓水位', 'delta': 10,
+                            'reason': f'当前持仓占总资金 {round(pos_ratio,1)}%(>70%)，仓位过重，增加现金'})
+        elif pos_ratio < 30:
+            ratio -= 5
+            reasons.append({'item': '持仓水位', 'delta': -5,
+                            'reason': f'当前持仓占总资金 {round(pos_ratio,1)}%(<30%)，轻仓可加码，减少现金'})
+        else:
+            reasons.append({'item': '持仓水位', 'delta': 0,
+                            'reason': f'当前持仓占总资金 {round(pos_ratio,1)}%(30%~70% 合理)，未调整'})
+
+    ratio = max(10.0, min(70.0, ratio))
+    return round(ratio, 1), reasons
+
+
+def build_buy_ladder(price, fair_value, amount):
+    """3档阶梯买入计划：现价 / -5% / -10%（深度折价时收紧为 -0%/-3%/-6%）"""
+    if amount <= 0 or price <= 0:
+        return []
+    deep = fair_value and price < fair_value * 0.9
+    drops = [0.0, 0.03, 0.06] if deep else [0.0, 0.05, 0.10]
+    ratios = [0.50, 0.30, 0.20] if deep else [0.40, 0.35, 0.25]
+    ladder = []
+    for i, (d, r) in enumerate(zip(drops, ratios)):
+        trigger = round(price * (1 - d), 2)
+        amt = amount * r
+        sh = int(amt // trigger) if trigger > 0 else 0
+        ladder.append({
+            'level': i + 1,
+            'trigger': trigger,
+            'ratio': round(r * 100),
+            'amount': round(amt, 2),
+            'shares': sh,
+        })
+    return ladder
+
+
+def build_sell_ladder(fair_value, shares):
+    """3档阶梯卖出计划：合理价 ×1.00 / ×1.10 / ×1.20，各约1/3"""
+    if not fair_value or shares <= 0:
+        return []
+    mults = [1.00, 1.10, 1.20]
+    ladder = []
+    remaining = shares
+    for i, m in enumerate(mults):
+        trigger = round(fair_value * m, 2)
+        n = shares // 3 if i < len(mults) - 1 else remaining
+        n = min(n, remaining)
+        if n <= 0:
+            continue
+        ladder.append({
+            'level': i + 1,
+            'trigger': trigger,
+            'ratio': round(n / shares * 100),
+            'shares': n,
+        })
+        remaining -= n
+    return ladder
+
+
+# ============================================================
+# API: 仓位与调整建议（现金比例 + 阶梯买卖）
 # ============================================================
 @app.route("/api/position", methods=["POST"])
 def position():
@@ -426,8 +616,10 @@ def position():
     total_capital = float(data.get("capital") or 0)
     symbols = data.get("symbols") or DEFAULT_SYMBOLS
     holdings = data.get("holdings") or {}
+    cash_override = data.get("cashOverride")
 
-    results = []
+    # ---------- 1. 抓取每只股票的基础数据 ----------
+    items = []
     for sym in symbols:
         try:
             t = yf.Ticker(sym)
@@ -435,7 +627,6 @@ def position():
             if hist is None or hist.empty:
                 continue
             price = float(hist["Close"].iloc[-1])
-
             models, info = calc_all_models(t, price)
             financials = get_financials(t)
             phase = detect_phase(financials)
@@ -443,105 +634,163 @@ def position():
             fair_value, best_keys, _ = pick_best_model(sector, phase, models)
             if not fair_value:
                 fair_value = price * 1.1
-
             discount = (fair_value - price) / fair_value if fair_value else 0
-            stop_loss = fair_value * 0.85
-            target_price = fair_value
 
             h = holdings.get(sym) or {}
             try:
-                cost = float(h.get('cost')) if h.get('cost') not in (None, '',) else None
+                sh = int(float(h.get('shares'))) if h.get('shares') not in (None, '') else 0
+            except Exception:
+                sh = 0
+            try:
+                cost = float(h.get('cost')) if h.get('cost') not in (None, '') else None
             except Exception:
                 cost = None
-            try:
-                shares = int(float(h.get('shares'))) if h.get('shares') not in (None, '',) else 0
-            except Exception:
-                shares = 0
 
-            item = {
-                "symbol": sym,
-                "price": round(price, 2),
-                "fairValue": round(fair_value, 2),
-                "discount": round(discount * 100, 1),
-                "sector": sector or "未知",
-                "phase": phase,
-                "stopLoss": round(stop_loss, 2),
-                "targetPrice": round(target_price, 2),
-                "cost": cost,
-                "shares": shares,
-            }
+            items.append({
+                'symbol': sym, 'price': price, 'fairValue': fair_value,
+                'discount': discount, 'sector': sector, 'phase': phase,
+                'bestKeys': best_keys, 'shares': sh, 'cost': cost,
+            })
+        except Exception:
+            continue
 
-            if shares > 0 and cost:
-                # ===== 已持仓 =====
-                market_value = price * shares
-                pnl = (price - cost) * shares
-                pnl_pct = (price - cost) / cost * 100
-                item.update({
-                    "marketValue": round(market_value, 2),
-                    "pnl": round(pnl, 2),
-                    "pnlPct": round(pnl_pct, 1),
-                    "holding": True,
-                })
+    # ---------- 2. 当前持仓市值 ----------
+    holding_value = sum(it['price'] * it['shares'] for it in items if it['shares'] > 0)
 
-                if pnl_pct > 50 and price > fair_value:
-                    item["actionType"] = "sell"
-                    item["delta"] = shares
-                    item["action"] = "大幅盈利且已超合理价：清仓锁定利润"
-                    item["detail"] = f"建议卖出全部 {shares} 股，落袋为安"
-                elif pnl_pct > 25 and price > fair_value:
-                    sell_n = max(1, shares // 3)
-                    item["actionType"] = "sell"
-                    item["delta"] = sell_n
-                    item["action"] = "盈利丰厚且估值偏高：减仓 1/3"
-                    item["detail"] = f"建议卖出 {sell_n} 股，保留 {shares - sell_n} 股，剩余仓位止损设 {stop_loss}"
-                elif pnl_pct < -20 and discount <= 0.05:
-                    item["actionType"] = "sell"
-                    item["delta"] = shares
-                    item["action"] = "亏损扩大且无估值优势：止损离场"
-                    item["detail"] = f"建议卖出全部 {shares} 股，止损价 {stop_loss}"
-                elif pnl_pct < -15 and discount > 0.10:
-                    buy_n = int((total_capital * 0.05) // price) if price > 0 else 0
-                    new_avg = ((cost * shares) + (price * buy_n)) / (shares + buy_n) if buy_n > 0 else cost
-                    item["actionType"] = "buy"
-                    item["delta"] = buy_n
-                    item["action"] = "亏损但显著低估：可补仓摊薄"
-                    item["detail"] = f"建议补仓 {buy_n} 股，成本由 {cost} 摊薄至约 {round(new_avg, 2)}" if buy_n > 0 else "资金不足，暂观望"
-                else:
-                    item["actionType"] = "hold"
-                    item["delta"] = 0
-                    item["action"] = "持有观望"
-                    item["detail"] = f"目标价 {target_price}，跌破 {stop_loss} 止损"
+    # ---------- 3. 市场上下文 + 建议现金比例 ----------
+    needed = list({(it['sector'] or '').lower() for it in items if it['sector']})
+    ctx = get_market_context(needed)
+    pcts = []
+    for it in items:
+        r = ctx.get('sector_rank', {}).get((it['sector'] or '').lower())
+        if r:
+            pcts.append(r['rank'] / r['total'])
+    ctx['sector_weak'] = bool(pcts) and (sum(pcts) / len(pcts) > 2 / 3)
+
+    cash_ratio, cash_reasons = calc_cash_ratio(ctx, holding_value, total_capital, cash_override)
+
+    cash_amount = total_capital * cash_ratio / 100
+    target_position_value = total_capital - cash_amount          # 目标总持仓市值
+    new_money = max(0.0, target_position_value - holding_value)  # 可新增投入
+
+    # ---------- 4. 先算各股目标金额，若超预算则等比缩放 ----------
+    desired = {}
+    for it in items:
+        price, fv, discount = it['price'], it['fairValue'], it['discount']
+        weight = 0.05 * (1 + discount * 2)
+        weight = max(0.01, min(weight, 0.15))
+        it['weight'] = weight
+        it['targetAmount'] = total_capital * weight
+        it['stopLoss'] = min([x for x in [it['cost'] * 0.90 if it['cost'] else None, fv * 0.85] if x])
+
+        holding_mv = price * it['shares'] if it['shares'] > 0 else 0.0
+        if it['shares'] > 0:
+            overvalued = price > fv
+            if overvalued or (it['cost'] and (price - it['cost']) / it['cost'] > 0.25):
+                desired[it['symbol']] = 0.0      # 卖出场景，不占用买入预算
+            elif discount > 0.10 and holding_mv < it['targetAmount']:
+                desired[it['symbol']] = it['targetAmount'] - holding_mv
             else:
-                # ===== 未持仓 =====
-                weight = 0.05 * (1 + discount * 2)
-                weight = max(0.01, min(weight, 0.15))
-                alloc = total_capital * weight
-                buy_n = int(alloc // price) if price > 0 else 0
+                desired[it['symbol']] = 0.0
+        else:
+            desired[it['symbol']] = it['targetAmount'] if discount > 0.05 else 0.0
 
-                if discount > 0.15:
-                    act = "强烈买入（深度折价）"
-                elif discount > 0.05:
-                    act = "分批买入"
-                elif discount > -0.05:
-                    act = "持有观望（估值合理）"
-                else:
-                    act = "高估，不建议买入"
+    total_desired = sum(desired.values())
+    scale = 1.0
+    if total_desired > new_money > 0:
+        scale = new_money / total_desired
+    elif new_money <= 0:
+        scale = 0.0
 
-                item.update({
-                    "holding": False,
-                    "actionType": "buy" if discount > 0.05 else "hold",
-                    "delta": buy_n if discount > 0.05 else 0,
-                    "action": act,
-                    "weight": round(weight * 100, 1),
-                    "allocation": round(alloc, 2),
-                    "detail": f"配置 {round(alloc)} 美元 / 约 {buy_n} 股" if buy_n > 0 else "当前不建议建仓",
-                })
+    # ---------- 5. 生成逐股计划 ----------
+    results = []
+    plan_buy_total = 0.0
+    for it in items:
+        price, fv, discount = it['price'], it['fairValue'], it['discount']
+        sh, cost = it['shares'], it['cost']
+        holding_mv = price * sh if sh > 0 else 0.0
 
-            results.append(item)
-        except Exception as e:
-            results.append({"symbol": sym, "error": str(e)})
+        item = {
+            'symbol': it['symbol'],
+            'price': round(price, 2),
+            'fairValue': round(fv, 2),
+            'discount': round(discount * 100, 1),
+            'sector': it['sector'] or '未知',
+            'phase': it['phase'],
+            'phaseLabel': PHASE_LABELS.get(it['phase'], '➖ 维持期'),
+            'weight': round(it['weight'] * 100, 1),
+            'targetAmount': round(it['targetAmount'], 2),
+            'stopLoss': round(it['stopLoss'], 2),
+            'shares': sh,
+            'cost': cost,
+            'holdingValue': round(holding_mv, 2),
+        }
+        sr = ctx.get('sector_rank', {}).get((it['sector'] or '').lower())
+        if sr:
+            item['sectorRank'] = sr
 
-    return jsonify(results)
+        if sh > 0:
+            pnl = (price - cost) * sh if cost else 0
+            pnl_pct = (price - cost) / cost * 100 if cost else 0
+            item['pnl'] = round(pnl, 2)
+            item['pnlPct'] = round(pnl_pct, 1)
+
+            overvalued = price > fv
+            big_profit = cost and (price - cost) / cost > 0.25
+            if overvalued or big_profit:
+                ladder = build_sell_ladder(fv, sh)
+                item['actionType'] = 'sell'
+                item['sellLadder'] = ladder
+                item['action'] = '分批止盈（阶梯卖出）'
+                item['detail'] = f'现价已接近/超过合理价 {round(fv,2)}，分 {len(ladder)} 档卖出共 {sum(l["shares"] for l in ladder)} 股'
+            elif discount > 0.10 and holding_mv < it['targetAmount'] and scale > 0:
+                amt = (it['targetAmount'] - holding_mv) * scale
+                ladder = build_buy_ladder(price, fv, amt)
+                plan_buy_total += sum(l['amount'] for l in ladder)
+                item['actionType'] = 'buy'
+                item['buyLadder'] = ladder
+                item['action'] = '低估且低于目标仓位：加仓'
+                item['detail'] = f'目标持仓 {round(it["targetAmount"])} 美元，当前 {round(holding_mv)} 美元'
+            else:
+                item['actionType'] = 'hold'
+                item['action'] = '持有观望'
+                item['detail'] = f'目标价 {round(fv,2)}，跌破 {round(it["stopLoss"],2)} 止损'
+        else:
+            if discount > 0.05 and scale > 0:
+                amt = it['targetAmount'] * scale
+                ladder = build_buy_ladder(price, fv, amt)
+                plan_buy_total += sum(l['amount'] for l in ladder)
+                item['actionType'] = 'buy'
+                item['buyLadder'] = ladder
+                item['action'] = '低估：分批建仓'
+                item['detail'] = f'配置 {round(amt)} 美元（占总资金 {round(it["weight"]*100,1)}%）'
+            else:
+                item['actionType'] = 'hold'
+                item['action'] = '估值偏高/合理：暂不建仓'
+                item['detail'] = '等待回调至合理价位以下再考虑'
+
+        results.append(item)
+
+    remain = max(0.0, new_money - plan_buy_total)
+
+    return jsonify({
+        'totalCapital': total_capital,
+        'cashRatio': cash_ratio,
+        'cashAmount': round(cash_amount, 2),
+        'cashReasons': cash_reasons,
+        'holdingValue': round(holding_value, 2),
+        'targetPositionValue': round(target_position_value, 2),
+        'newMoney': round(new_money, 2),
+        'planBuyTotal': round(plan_buy_total, 2),
+        'remainInvestable': round(remain, 2),
+        'market': {
+            'sp500Price': ctx.get('sp500_price'),
+            'sp500Ma200': ctx.get('sp500_ma200'),
+            'sp500AboveMa200': ctx.get('sp500_above_ma200'),
+            'vix': ctx.get('vix'),
+        },
+        'items': results,
+    })
 
 
 if __name__ == "__main__":
