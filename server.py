@@ -125,6 +125,36 @@ def _pick_close(df):
     return None
 
 
+def _pick_col(df, name):
+    """取指定列（兼容 MultiIndex）"""
+    if df is None or getattr(df, 'empty', True):
+        return None
+    try:
+        cols = df.columns
+        if isinstance(cols, pd.MultiIndex):
+            df = df.copy()
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in cols]
+        if name in df.columns:
+            return df[name].dropna()
+    except Exception:
+        pass
+    return None
+
+
+def calc_atr(df, period=14):
+    """14 日 ATR（真实波幅均值），衡量个股日常波动大小"""
+    try:
+        h, l, c = _pick_col(df, 'High'), _pick_col(df, 'Low'), _pick_col(df, 'Close')
+        if h is None or l is None or c is None or len(c) < period + 1:
+            return None
+        prev_c = c.shift(1)
+        tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean().iloc[-1]
+        return float(atr) if pd.notna(atr) and atr > 0 else None
+    except Exception:
+        return None
+
+
 def get_financials(t):
     """最近 1 年（最多 5 个季度）财报：营收、净利润、EPS、营收同比"""
     result = []
@@ -244,6 +274,7 @@ def calc_all_models(t, current_price):
     except Exception:
         pass
 
+    metrics = {'atr': None, 'atrPct': None, 'low52': None}
     try:
         h = yf.download(t.ticker, period="1y", progress=False)
         s = _pick_close(h)
@@ -251,30 +282,55 @@ def calc_all_models(t, current_price):
             avg = float(s.mean())
             if avg > 0:
                 models['mean_reversion'] = avg
+            try:
+                metrics['low52'] = float(s.min())
+            except Exception:
+                pass
+        a = calc_atr(h)
+        if a and a > 0:
+            metrics['atr'] = a
+            metrics['atrPct'] = round(a / current_price * 100, 2) if current_price else None
     except Exception:
         pass
 
-    return models, info
+    # ---------- 异常值防护：单模型价格须落在现价的合理区间 ----------
+    # BRK-B 曾出现某模型返回"总市值量级"的数字（百万美元），导致 FV 被污染，
+    # 进而使止损价 = FV×0.85 变成 133 万。这里直接剔除离谱模型。
+    outliers = {}
+    if current_price and current_price > 0:
+        lo, hi = current_price * 0.2, current_price * 5
+        for k in list(models.keys()):
+            v = models.get(k)
+            if v is None or v <= 0 or v < lo or v > hi:
+                outliers[k] = round(float(v), 2) if v else None
+                models.pop(k, None)
+
+    return models, info, metrics, outliers
 
 
-def pick_best_model(sector, phase, models):
+def pick_best_model(sector, phase, models, current_price=None):
     """按行业+阶段挑最合适模型；多个则等权。返回 (fair_value, keys_used, fallback)"""
     sector_key = (sector or '').strip().lower()
     mapping = SECTOR_BEST_MODEL.get(sector_key, {})
     want_keys = mapping.get(phase) or mapping.get('flat') or []
 
+    def _clamp(v):
+        if current_price and current_price > 0 and v:
+            return max(current_price * 0.3, min(float(v), current_price * 3))
+        return v
+
     usable = [k for k in want_keys if k in models and models.get(k)]
     if usable:
         val = sum(models[k] for k in usable) / len(usable)
-        return val, usable, False
+        return _clamp(val), usable, False
 
     # 回退：分析师目标价
     if models.get('analyst_target'):
-        return models['analyst_target'], ['analyst_target'], True
+        return _clamp(models['analyst_target']), ['analyst_target'], True
     # 再回退：任一可用模型
     if models:
         k = list(models.keys())[0]
-        return models[k], [k], True
+        return _clamp(models[k]), [k], True
     return None, [], True
 
 
@@ -370,12 +426,12 @@ def analyze(symbol):
             return jsonify({"error": "无行情数据"})
         current_price = float(hist5["Close"].iloc[-1])
 
-        models, info = calc_all_models(t, current_price)
+        models, info, metrics, outliers = calc_all_models(t, current_price)
         financials = get_financials(t)
         phase = detect_phase(financials)
         sector = info.get('sector') or ''
 
-        fair_value, best_keys, is_fallback = pick_best_model(sector, phase, models)
+        fair_value, best_keys, is_fallback = pick_best_model(sector, phase, models, current_price)
 
         # 历史百分位（2年）
         hist = yf.download(symbol, period="2y", progress=False)
@@ -412,6 +468,8 @@ def analyze(symbol):
             "percentile": round(percentile, 1),
             "models": model_display,
             "financials": financials,
+            "outliers": outliers,
+            "atrPct": metrics.get('atrPct'),
         })
     except Exception as e:
         return jsonify({"error": str(e)})
@@ -562,16 +620,32 @@ def calc_cash_ratio(ctx, holding_value, total_capital, override=None):
     return round(ratio, 1), reasons
 
 
-def build_buy_ladder(price, fair_value, amount):
-    """3档阶梯买入计划：现价 / -5% / -10%（深度折价时收紧为 -0%/-3%/-6%）"""
+def build_buy_ladder(price, fair_value, amount, atr=None):
+    """
+    3 档阶梯买入 = 估值闸门(FV安全边际) ∧ 波动闸门(ATR间距)，取更低者。
+    档1：便宜就现在买（触发=min(FV×0.9, 现价)），否则挂 FV×0.9 等回调
+    档2/3：min(FV×0.8/×0.65, 现价−3ATR/−5ATR) —— 档距由个股波动率自动撑开
+    资金配比：正金字塔 20/30/50（越跌买越多，摊低成本）
+    """
     if amount <= 0 or price <= 0:
         return []
-    deep = fair_value and price < fair_value * 0.9
-    drops = [0.0, 0.03, 0.06] if deep else [0.0, 0.05, 0.10]
-    ratios = [0.50, 0.30, 0.20] if deep else [0.40, 0.35, 0.25]
+    atr = atr if (atr and atr > 0) else price * 0.02   # 缺省按 2% 波动
+    fv = fair_value if (fair_value and fair_value > 0) else price
+
+    margins = [0.90, 0.80, 0.65]      # 估值锚：安全边际 10%/20%/35%
+    atr_mults = [0.0, 3.0, 5.0]       # 波动锚：档1 不额外下探，档2/3 拉开 3/5 倍 ATR
+    ratios = [0.20, 0.30, 0.50]       # 越跌买越多
+    deep_value = price <= fv * 0.65   # 已处深度价值区 → 档1 立即建仓
+
     ladder = []
-    for i, (d, r) in enumerate(zip(drops, ratios)):
-        trigger = round(price * (1 - d), 2)
+    for i, (m, am, r) in enumerate(zip(margins, atr_mults, ratios)):
+        fv_price = round(fv * m, 2)
+        atr_price = round(price - am * atr, 2)
+        if i == 0:
+            trigger = price if deep_value else min(fv_price, price)
+        else:
+            trigger = min(fv_price, atr_price)
+        trigger = round(max(trigger, price * 0.3), 2)   # 兜底不低于现价 30%
         amt = amount * r
         sh = int(amt // trigger) if trigger > 0 else 0
         ladder.append({
@@ -580,28 +654,49 @@ def build_buy_ladder(price, fair_value, amount):
             'ratio': round(r * 100),
             'amount': round(amt, 2),
             'shares': sh,
+            'fvAnchor': fv_price,
+            'atrAnchor': atr_price,
+            'gapPct': round((trigger / price - 1) * 100, 1),
+            'immediate': price <= trigger + 1e-9,   # 现价是否已触发
         })
     return ladder
 
 
-def build_sell_ladder(fair_value, shares):
-    """3档阶梯卖出计划：合理价 ×1.00 / ×1.10 / ×1.20，各约1/3"""
+def build_sell_ladder(fair_value, shares, price=None, atr=None):
+    """
+    3 档阶梯卖出 = 估值锚(FV溢价) ∧ 波动闸门(ATR)，取更高者。
+    档1：现价已超 FV 则立即减 1/3，否则挂 FV×1.00
+    档2/3：max(FV×1.15/×1.30, 现价+3ATR/+5ATR) —— 避免日内噪音洗出
+    """
     if not fair_value or shares <= 0:
         return []
-    mults = [1.00, 1.10, 1.20]
+    price = price or fair_value
+    atr = atr if (atr and atr > 0) else price * 0.02
+    fv = fair_value
+
+    mults = [1.00, 1.15, 1.30]
+    atr_mults = [0.0, 3.0, 5.0]
     ladder = []
     remaining = shares
-    for i, m in enumerate(mults):
-        trigger = round(fair_value * m, 2)
+    for i, (m, am) in enumerate(zip(mults, atr_mults)):
+        fv_price = round(fv * m, 2)
+        atr_price = round(price + am * atr, 2)
+        trigger = max(fv_price, atr_price) if i > 0 else max(fv_price, min(price, fv_price))
+        if i == 0:
+            trigger = fv_price if price < fv_price else price   # 已溢价则立即减
         n = shares // 3 if i < len(mults) - 1 else remaining
         n = min(n, remaining)
         if n <= 0:
             continue
         ladder.append({
             'level': i + 1,
-            'trigger': trigger,
+            'trigger': round(trigger, 2),
             'ratio': round(n / shares * 100),
             'shares': n,
+            'fvAnchor': fv_price,
+            'atrAnchor': atr_price,
+            'gapPct': round((trigger / price - 1) * 100, 1) if price else 0,
+            'immediate': price >= trigger - 1e-9,
         })
         remaining -= n
     return ladder
@@ -627,11 +722,11 @@ def position():
             if hist is None or hist.empty:
                 continue
             price = float(hist["Close"].iloc[-1])
-            models, info = calc_all_models(t, price)
+            models, info, metrics, outliers = calc_all_models(t, price)
             financials = get_financials(t)
             phase = detect_phase(financials)
             sector = info.get('sector') or ''
-            fair_value, best_keys, _ = pick_best_model(sector, phase, models)
+            fair_value, best_keys, _ = pick_best_model(sector, phase, models, price)
             if not fair_value:
                 fair_value = price * 1.1
             discount = (fair_value - price) / fair_value if fair_value else 0
@@ -650,6 +745,8 @@ def position():
                 'symbol': sym, 'price': price, 'fairValue': fair_value,
                 'discount': discount, 'sector': sector, 'phase': phase,
                 'bestKeys': best_keys, 'shares': sh, 'cost': cost,
+                'atr': metrics.get('atr'), 'atrPct': metrics.get('atrPct'),
+                'low52': metrics.get('low52'), 'outliers': outliers,
             })
         except Exception:
             continue
@@ -681,7 +778,15 @@ def position():
         weight = max(0.01, min(weight, 0.15))
         it['weight'] = weight
         it['targetAmount'] = total_capital * weight
-        it['stopLoss'] = min([x for x in [it['cost'] * 0.90 if it['cost'] else None, fv * 0.85] if x])
+        # 止损 = 论点破坏价：成本−15% / FV×0.85 / 52周低点 / 现价−2ATR，取最低（最宽松）
+        atr = it.get('atr') or price * 0.02
+        cands = [x for x in [
+            it['cost'] * 0.85 if it['cost'] else None,
+            fv * 0.85,
+            it.get('low52'),
+            price - 2 * atr,
+        ] if x and x > 0]
+        it['stopLoss'] = min(cands) if cands else fv * 0.85
 
         holding_mv = price * it['shares'] if it['shares'] > 0 else 0.0
         if it['shares'] > 0:
@@ -721,6 +826,7 @@ def position():
             'weight': round(it['weight'] * 100, 1),
             'targetAmount': round(it['targetAmount'], 2),
             'stopLoss': round(it['stopLoss'], 2),
+            'atrPct': it.get('atrPct'), 'low52': it.get('low52'),
             'shares': sh,
             'cost': cost,
             'holdingValue': round(holding_mv, 2),
@@ -738,14 +844,14 @@ def position():
             overvalued = price > fv
             big_profit = cost and (price - cost) / cost > 0.25
             if overvalued or big_profit:
-                ladder = build_sell_ladder(fv, sh)
+                ladder = build_sell_ladder(fv, sh, price, it.get('atr'))
                 item['actionType'] = 'sell'
                 item['sellLadder'] = ladder
                 item['action'] = '分批止盈（阶梯卖出）'
                 item['detail'] = f'现价已接近/超过合理价 {round(fv,2)}，分 {len(ladder)} 档卖出共 {sum(l["shares"] for l in ladder)} 股'
             elif discount > 0.10 and holding_mv < it['targetAmount'] and scale > 0:
                 amt = (it['targetAmount'] - holding_mv) * scale
-                ladder = build_buy_ladder(price, fv, amt)
+                ladder = build_buy_ladder(price, fv, amt, it.get('atr'))
                 plan_buy_total += sum(l['amount'] for l in ladder)
                 item['actionType'] = 'buy'
                 item['buyLadder'] = ladder
@@ -758,7 +864,7 @@ def position():
         else:
             if discount > 0.05 and scale > 0:
                 amt = it['targetAmount'] * scale
-                ladder = build_buy_ladder(price, fv, amt)
+                ladder = build_buy_ladder(price, fv, amt, it.get('atr'))
                 plan_buy_total += sum(l['amount'] for l in ladder)
                 item['actionType'] = 'buy'
                 item['buyLadder'] = ladder
