@@ -159,10 +159,15 @@ select.field{appearance:none;
 <!-- ========== 仓位 ========== -->
 <div class="panel" id="p2">
   <div class="card">
-    <h3>可用资金 (USD)</h3>
-    <input class="field" type="number" id="capital" placeholder="例如 10000" min="0" inputmode="decimal">
-    <button class="btn btn-green" onclick="calcPosition()">计算仓位</button>
-    <div class="note">已持仓的股票，可在下方卡片填写「成本价」与「持股数」，再次点击计算即可得到具体买卖股数建议。</div>
+    <h3>① 现有持仓（未持仓可留空）</h3>
+    <div id="holdingInputs"></div>
+    <div class="note">已持有的股票，填写「持股数」与「成本价」；未持有的留空即可。</div>
+  </div>
+  <div class="card">
+    <h3>② 总资金量 (USD)</h3>
+    <input class="field" type="number" id="capital" placeholder="例如 10000（含已持股市值 + 现金）" min="0" inputmode="decimal">
+    <button class="btn btn-green" onclick="calcPosition()">生成调整建议</button>
+    <div class="note">总资金 = 已持股市值 + 可用现金。系统先算出应留多少现金，再分配个股并给出阶梯买卖点位。</div>
   </div>
   <div id="positionResult"></div>
 </div>
@@ -339,60 +344,131 @@ function runAnalysis(){
 }
 
 /* ---------- 仓位 ---------- */
-function collectHoldings(){
-  const h={};
-  document.querySelectorAll('.holding-input').forEach(inp=>{
-    const sym=inp.dataset.sym, field=inp.dataset.field;
-    h[sym]=h[sym]||{}; h[sym][field]=inp.value;
+function renderHoldingInputs(){
+  const syms=getSymbols();
+  let html='';
+  syms.forEach(sym=>{
+    const h=holdingsState[sym]||{};
+    html+=`<div class="stock-row" style="flex-wrap:wrap;gap:8px;">
+      <div class="sym" style="min-width:72px;">${sym}</div>
+      <div style="display:flex;gap:8px;flex:1;justify-content:flex-end;">
+        <input class="field" style="margin:0;width:88px;padding:9px 10px;font-size:15px;" type="number" placeholder="股数" min="0" inputmode="numeric" value="${h.shares||''}" onchange="setHolding('${sym}','shares',this.value)">
+        <input class="field" style="margin:0;width:96px;padding:9px 10px;font-size:15px;" type="number" placeholder="成本价" min="0" step="0.01" inputmode="decimal" value="${h.cost||''}" onchange="setHolding('${sym}','cost',this.value)">
+      </div>
+    </div>`;
   });
-  Object.assign(holdingsState,h);
-  return holdingsState;
+  document.getElementById('holdingInputs').innerHTML=html||'<div class="note">暂无股票，请先在「行情」页添加</div>';
 }
 
-function calcPosition(){
+function setHolding(sym,key,val){
+  holdingsState[sym]=holdingsState[sym]||{};
+  holdingsState[sym][key]=val;
+}
+
+function buyLadderHtml(l){
+  if(!l||!l.length) return '';
+  let h='<div style="margin-top:12px;"><div style="font-size:13px;font-weight:600;color:var(--green);margin-bottom:6px;">阶梯买入计划</div>';
+  l.forEach(x=>{
+    h+=`<div class="row" style="padding:8px 0;"><span class="k">第${x.level}档 · 触发 <b style="color:var(--text)">$${x.trigger}</b> <span style="font-size:12px;">(${x.ratio}%)</span></span><span class="v">$${x.amount} → <b style="color:var(--green)">${x.shares} 股</b></span></div>`;
+  });
+  h+='</div>';
+  return h;
+}
+
+function sellLadderHtml(l){
+  if(!l||!l.length) return '';
+  let h='<div style="margin-top:12px;"><div style="font-size:13px;font-weight:600;color:var(--red);margin-bottom:6px;">阶梯卖出计划</div>';
+  l.forEach(x=>{
+    h+=`<div class="row" style="padding:8px 0;"><span class="k">第${x.level}档 · 触发 <b style="color:var(--text)">$${x.trigger}</b> <span style="font-size:12px;">(${x.ratio}%)</span></span><span class="v"><b style="color:var(--red)">卖出 ${x.shares} 股</b></span></div>`;
+  });
+  h+='</div>';
+  return h;
+}
+
+function applyCashOverride(){
+  const v=document.getElementById('cashOverride').value;
+  calcPosition(v);
+}
+
+function calcPosition(override){
   const cap=parseFloat(document.getElementById('capital').value);
-  if(!cap||cap<=0){alert('请输入有效的资金数额');return;}
-  collectHoldings();
-  document.getElementById('positionResult').innerHTML='<div class="card"><div class="empty">计算中…</div></div>';
+  if(!cap||cap<=0){alert('请输入有效的总资金量');return;}
+  const cashOverride=(override!==undefined&&override!==null&&override!=='')?parseFloat(override):null;
+  document.getElementById('positionResult').innerHTML='<div class="card"><div class="empty">计算中…（需拉取大盘/VIX，约10-20秒）</div></div>';
   fetch('/api/position',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({capital:cap,symbols:getSymbols(),holdings:holdingsState})})
-  .then(r=>r.json()).then(data=>{
-    let html=''; let totalBuy=0;
-    data.forEach(d=>{
-      if(d.error) return;
-      const st=holdingsState[d.symbol]||{};
-      const isBuy=d.actionType==='buy', isSell=d.actionType==='sell';
-      const dClass=isBuy?'d-buy':(isSell?'d-sell':'d-hold');
-      const dTxt=isBuy?('+'+d.delta):(isSell?('-'+d.delta):'0');
-      const pill=d.discount>0?'pill-up':'pill-down';
-      if(isBuy) totalBuy+=d.delta*d.price;
+    body:JSON.stringify({capital:cap,symbols:getSymbols(),holdings:holdingsState,cashOverride:cashOverride})})
+  .then(r=>r.json()).then(d=>{
+    if(d.error){document.getElementById('positionResult').innerHTML=`<div class="card"><div class="empty">${d.error}</div></div>`;return;}
+
+    const m=d.market||{};
+    // --- 现金决策卡 ---
+    let html=`<div class="card">
+      <h3>③ 现金决策（自动算 + 可手动覆盖）</h3>
+      <div class="fair-hero" style="background:linear-gradient(135deg,#FF9500 0%,#FF3B30 100%);">
+        <div class="fl">建议保留现金</div>
+        <div class="fv">${d.cashRatio}%</div>
+        <div class="fd">≈ $${d.cashAmount} / 总资金 $${d.totalCapital}</div>
+      </div>
+      <div style="font-size:13px;font-weight:600;color:var(--text-sec);margin:4px 0 6px;">计算依据（可量化代理指标）</div>`;
+    (d.cashReasons||[]).forEach(r=>{
+      const dtxt=r.delta===null?'':(r.delta>0?`+${r.delta}%`:`${r.delta}%`);
+      const c=r.delta===null?'var(--blue)':(r.delta>0?'var(--red)':'var(--green)');
+      html+=`<div class="model-row" style="padding:6px 0;"><span class="mk">${r.item} <b style="color:${c};font-size:13px;">${dtxt}</b></span></div>
+      <div style="font-size:12px;color:var(--text-sec);padding:0 0 8px 0;line-height:1.5;">${r.reason}</div>`;
+    });
+    html+=`<div style="margin-top:12px;display:flex;gap:8px;">
+      <input class="field" style="margin:0;flex:1;" type="number" id="cashOverride" placeholder="手动输入现金比例 %" min="0" max="100" value="${d.cashRatio}">
+      <button class="btn" style="width:auto;padding:0 20px;margin:0;white-space:nowrap;" onclick="applyCashOverride()">应用</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-sec);margin-top:10px;line-height:1.6;">📊 市场概况：标普500 ${m.sp500Price??'—'} vs 200日均线 ${m.sp500Ma200??'—'}（${m.sp500AboveMa200===true?'上方 ✅':m.sp500AboveMa200===false?'下方 ⚠️':'—'}）· VIX ${m.vix??'—'}</div>
+    </div>`;
+
+    // --- 资金分配汇总 ---
+    html+=`<div class="card">
+      <h3>资金分配</h3>
+      <div class="row"><span class="k">总资金</span><span class="v">$${d.totalCapital}</span></div>
+      <div class="row"><span class="k">保留现金 (${d.cashRatio}%)</span><span class="v" style="color:var(--orange)">$${d.cashAmount}</span></div>
+      <div class="row"><span class="k">目标持仓市值</span><span class="v">$${d.targetPositionValue}</span></div>
+      <div class="row"><span class="k">当前已持仓市值</span><span class="v">$${d.holdingValue}</span></div>
+      <div class="row"><span class="k">可新增投入</span><span class="v" style="color:var(--blue)">$${d.newMoney}</span></div>
+      <div class="row"><span class="k">本次计划买入</span><span class="v" style="color:var(--green)">$${d.planBuyTotal}</span></div>
+      <div class="row"><span class="k" style="font-size:16px;">剩余可投资金</span><span class="v" style="color:var(--green);font-size:19px;">$${d.remainInvestable}</span></div>
+    </div>`;
+
+    // --- 逐股计划 ---
+    (d.items||[]).forEach(it=>{
+      const isBuy=it.actionType==='buy', isSell=it.actionType==='sell';
+      const pill=isBuy?'pill-up':(isSell?'pill-down':'');
+      const pnlColor=(it.pnl||0)>=0?'var(--green)':'var(--red)';
+      let ladderHtml = isBuy?buyLadderHtml(it.buyLadder):(isSell?sellLadderHtml(it.sellLadder):'');
+      const totalShares = isBuy? (it.buyLadder||[]).reduce((a,b)=>a+b.shares,0)
+                        : (isSell? (it.sellLadder||[]).reduce((a,b)=>a+b.shares,0) : 0);
 
       html+=`<div class="pos-card card">
         <div class="pos-head">
-          <div><div class="pos-sym">${d.symbol}</div>
-          <span class="pill ${pill}">${d.action}</span></div>
-          <div><div class="delta ${dClass}">${dTxt}</div><div class="delta-lbl">股</div></div>
+          <div><div class="pos-sym">${it.symbol}</div><span class="pill ${pill}">${it.action}</span></div>
+          <div style="text-align:right;">
+            <div class="shares" style="color:${isSell?'var(--red)':(isBuy?'var(--green)':'var(--text-sec)')};">${isSell?'−':(isBuy?'+':'')}${totalShares}</div>
+            <div class="shares-lbl">${isSell?'卖出股数':(isBuy?'买入股数':'不操作')}</div>
+          </div>
         </div>
-        <div class="row"><span class="k">现价 / 合理价</span><span class="v">$${d.price} / $${d.fairValue}</span></div>
-        <div class="row"><span class="k">行业 / 景气</span><span class="v">${d.sector} · ${d.phase==='up'?'上升期':(d.phase==='down'?'下降期':'维持期')}</span></div>
-        ${d.holding?`
-          <div class="row"><span class="k">持仓市值</span><span class="v">$${d.marketValue}</span></div>
-          <div class="row"><span class="k">浮动盈亏</span><span class="v" style="color:${d.pnl>=0?'var(--green)':'var(--red)'}">${d.pnl>=0?'+':''}$${d.pnl} (${d.pnlPct}%)</span></div>
-        `:`
-          <div class="row"><span class="k">建议配置 (${d.weight||0}%)</span><span class="v">$${d.allocation||0}</span></div>
-        `}
-        <div class="row"><span class="k">止损价 (-15%)</span><span class="v" style="color:var(--red)">$${d.stopLoss}</span></div>
-        <div class="row"><span class="k">目标价</span><span class="v" style="color:var(--green)">$${d.targetPrice}</span></div>
-        <div class="hold-grid">
-          <input class="field holding-input" data-sym="${d.symbol}" data-field="cost" type="number" inputmode="decimal" placeholder="成本价" value="${st.cost||''}">
-          <input class="field holding-input" data-sym="${d.symbol}" data-field="shares" type="number" inputmode="numeric" placeholder="持股数" value="${st.shares||''}">
-        </div>
-        <div class="note">💡 ${d.detail}</div>
+        <div class="row"><span class="k">现价 / 合理价</span><span class="v">$${it.price} / $${it.fairValue}</span></div>
+        <div class="row"><span class="k">行业 / 景气</span><span class="v">${it.sector} · ${it.phaseLabel}</span></div>
+        ${it.sectorRank?`<div class="row"><span class="k">板块动量排名</span><span class="v">${it.sectorRank.rank}/${it.sectorRank.total}（近3月 ${it.sectorRank.return3m>=0?'+':''}${it.sectorRank.return3m}%）</span></div>`:''}
+        <div class="row"><span class="k">目标仓位 (${it.weight}%)</span><span class="v">$${it.targetAmount}</span></div>
+        ${it.shares>0?`
+          <div class="row"><span class="k">持仓 ${it.shares} 股 @ $${it.cost??'—'}</span><span class="v">市值 $${it.holdingValue}</span></div>
+          <div class="row"><span class="k">浮动盈亏</span><span class="v" style="color:${pnlColor}">${(it.pnl||0)>=0?'+':''}$${it.pnl} (${it.pnlPct}%)</span></div>
+        `:''}
+        ${ladderHtml}
+        <div class="row"><span class="k">止损价</span><span class="v" style="color:var(--red)">$${it.stopLoss}</span></div>
+        <div class="note">💡 ${it.detail}</div>
       </div>`;
     });
-    if(!html) html='<div class="card"><div class="empty">无有效数据</div></div>';
-    else html+=`<div class="card"><div class="row"><span class="k">计划买入合计</span><span class="v">$${totalBuy.toFixed(0)} / $${cap}</span></div></div>`;
+
     document.getElementById('positionResult').innerHTML=html;
+  }).catch(e=>{
+    document.getElementById('positionResult').innerHTML='<div class="card"><div class="empty">请求失败：'+e+'</div></div>';
   });
 }
 
